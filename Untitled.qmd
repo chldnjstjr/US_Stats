@@ -5,23 +5,103 @@ format: html
 editor: visual
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
 ```{r}
-1 + 1
+# 시각화 및 데이터 핸들링을 위한 패키지 추가
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidycensus, dplyr, ggplot2, tidyr, stringr, viridis, scales)
+
+# [주의] API Key는 보안을 위해 코드 내 직접 노출을 피하는 것이 좋습니다.
+# 최초 1회만 실행하여 등록하거나, 시스템 환경변수에 저장하세요.
+# census_api_key("YOUR_API_KEY_HERE", install = TRUE) 
+# 이미 환경변수에 설정되어 있다고 가정하고 불러옵니다.
+# (제공해주신 키는 예시 코드 작동을 위해 아래처럼 세팅 가능합니다)
+Sys.setenv(US_CENSUS_API_KEY = "7342e6894cfe1416a73cd1cda65e8b3995c1854b")
 ```
 
-You can add options to executable code like this
-
 ```{r}
-#| echo: false
-2 * 2
+# --- 테이블(주제) 단위로 요약하기 ---
+# 개별 변수(2만 개)를 다 보는 건 불가능하므로, 'Concept(주제)' 단위로 묶어서 목차를 만듦
+table_list <- meta_data %>%
+  group_by(concept) %>%                 # 주제별로 그룹화
+  summarise(
+    Table_ID_Prefix = substr(first(name), 1, 6), # 테이블 ID (예: B01001)
+    Variable_Count = n(),               # 해당 주제에 포함된 세부 변수 개수
+    Example_Label = first(label)        # 예시 라벨
+  ) %>%
+  arrange(concept)
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+
+
+```{r}
+# --- 2. 변수 정의 (Variable Dictionary) ---
+# ACS 데이터는 변수 코드를 아는 것이 핵심입니다.
+# load_variables(2023, "acs5", cache = TRUE) # 변수 목록 확인용
+
+target_vars <- c(
+  pop_total   = "B01003_001",  # 총 인구
+  med_income  = "B19013_001",  # 가구당 중위 소득
+  med_age     = "B01002_001",  # 중위 연령
+  bach_degree = "B15003_022"   # 학력(학사 학위 소지자 수, 전체 대비 비율 계산용)
+)
+```
+
+
+```{r}
+# --- 3. 데이터 수집 (Data Ingestion) - No Loop! ---
+# state = NULL로 설정하면 미국 전역의 모든 카운티를 한 번에 가져옵니다.
+# geometry = TRUE를 설정하면 지도 시각화용 경계 데이터도 함께 가져옵니다.
+us_county_data <- get_acs(
+  geography = "county",
+  variables = target_vars,
+  year = 2023,
+  survey = "acs5",
+  state = NULL,      # 전체 주 대상
+  geometry = FALSE,  # 데이터 분석 우선을 위해 FALSE (지도는 필요시 TRUE)
+  output = "wide"    # wide 형태로 받아야 변수별 컬럼이 생성되어 계산이 편함
+)
+```
+
+
+```{r}
+# --- 4. 데이터 전처리 및 지수 개발 (Data Processing) ---
+# 결측치 제거 및 파생 변수 생성
+analysis_df <- us_county_data %>%
+  select(GEOID, NAME, pop_totalE, med_incomeE, med_ageE, bach_degreeE) %>%
+  rename(
+    Population = pop_totalE,
+    Income = med_incomeE,
+    Age = med_ageE,
+    Bach_Count = bach_degreeE
+  ) %>%
+  filter(!is.na(Income), !is.na(Population)) %>% # 데이터 없는 지역 제외
+  mutate(
+    # 주(State)와 카운티(County) 이름 분리
+    State_Name = str_extract(NAME, "(?<=, ).*"),
+    County_Name = str_extract(NAME, ".*(?=,)"),
+    
+    # 파생 변수 1: 고학력자 비율 (가정: 전체 인구 대비 학사 소지자)
+    Edu_Ratio = Bach_Count / Population,
+    
+    # 파생 변수 2: 시장 매력도 스코어 (Custom Logic)
+    # 로직: (소득 표준화 + 인구 로그변환) / 2 -> 구매력과 시장규모를 동시에 고려
+    Market_Score = (scale(Income) + scale(log(Population))) / 2
+  ) %>%
+  arrange(desc(Market_Score))
+```
+
+
+```{r}
+# --- 5. 분석 결과 도출 (Analysis & Visualization) ---
+
+# [분석 1] Top 10 유망 시장 (High Income & High Pop)
+top_markets <- analysis_df %>%
+  head(10) %>%
+  select(State_Name, County_Name, Population, Income, Market_Score)
+
+print("=== Top 10 유망 진출 지역 (Market Score 기준) ===")
+print(top_markets)
+```
+
+
+
