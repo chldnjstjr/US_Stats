@@ -2,3 +2,14 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# API 키 보안 - 절대 커밋하지 마세요
+.Renviron
+
+# 대용량 캐시 데이터 (Census API 원본)
+data/raw/
+
+# Quarto 렌더링 캐시
+_cache/
+*_cache/
+*_files/

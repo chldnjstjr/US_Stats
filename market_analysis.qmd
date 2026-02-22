@@ -1,0 +1,508 @@
+---
+title: "미국 시장 진입 최적 지점 분석"
+subtitle: "US Census Bureau ACS 5-Year Estimates 기반 카운티 수준 마이크로 타겟팅"
+author: "WS CHOI"
+date: today
+lang: ko
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "목차"
+    toc-float: true
+    number-sections: true
+    code-fold: true
+    code-summary: "▶ 코드 보기"
+    self-contained: true
+    fig-width: 10
+    fig-height: 6
+    df-print: paged
+execute:
+  warning: false
+  message: false
+  cache: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+
+# 소개
+
+## 이 문서의 목적
+
+미국은 전 세계 GDP의 약 25%를 차지하는 거대한 소비 시장입니다. 그러나 미국을 '하나의 단일 국가'로 접근하는 것은 큰 실수입니다. 미국은 **50개 주(State)**가 모인 연합체이며, 각 주·카운티마다 법, 문화, 인구 구성, 소득 수준이 천차만별입니다.
+
+이 문서는 **US Census Bureau의 ACS(American Community Survey) 5-Year Estimates** 데이터를 활용하여, 귀사의 제품/서비스에 맞는 미국 내 최적 진출 지점을 카운티(County) 수준에서 정밀하게 찾아내는 **재현 가능한 분석 프레임워크**를 제공합니다.
+
+### ACS 데이터란?
+
+**ACS(American Community Survey)**는 미국 통계청(Census Bureau)이 매년 약 350만 가구를 대상으로 실시하는 심층 사회경제 조사입니다.
+
+- **5-Year Estimates**: 5년치 표본을 누적하여 산출한 추정치
+  - 1년치보다 표본이 많아 **인구가 적은 시골 지역까지 통계 신뢰도** 확보
+  - 틈새시장(Niche Market) 발굴에 최적화
+- **주요 수록 정보**: 소득, 교육 수준, 연령, 가족 구성, 주거 형태, 직종 등
+
+## 실행 전 준비사항 {.unnumbered}
+
+::: {.callout-important}
+### API 키 설정 (최초 1회)
+
+Census 데이터를 무료로 사용하려면 API 키가 필요합니다.
+
+1. [https://api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html) 에서 무료 키 신청
+2. 프로젝트 루트의 `.Renviron` 파일에 아래 내용 추가:
+
+```
+CENSUS_API_KEY=여기에_발급받은_키_입력
+```
+
+3. RStudio 재시작 후 `Sys.getenv("CENSUS_API_KEY")`로 확인
+:::
+
+---
+
+# 분석 파라미터 설정
+
+::: {.callout-tip}
+### 사용자가 수정할 부분은 여기뿐입니다!
+
+아래 4개 파라미터만 수정하면 다양한 산업과 지역에 맞는 분석을 즉시 실행할 수 있습니다.
+:::
+
+```{r params}
+# ============================================================
+# [사용자 설정] 이 블록만 수정하세요!
+# ============================================================
+
+# 분석 연도 (현재 ACS5 최신: 2023)
+ANALYSIS_YEAR <- 2023
+
+# 산업 프로파일 선택:
+#   "baby_products"    → 유아용품 (분유, 기저귀, 장난감)
+#   "k_beauty"         → K-뷰티 (스킨케어, 화장품)
+#   "k_food"           → K-푸드 (라면, 소스, 냉동식품)
+#   "premium_consumer" → 프리미엄 소비재 (가전, 패션, 건강식품)
+#   "custom"           → 사용자 정의 (R/05_profiles.R 에서 직접 수정)
+SELECTED_PROFILE <- "k_beauty"
+
+# 결과 표시 개수 (상위 N개 카운티)
+TOP_N <- 30
+
+# 특정 주(State)만 분석하려면: c("CA", "NY", "TX")
+# 전국 분석: NULL
+STATE_FILTER <- NULL
+
+# ============================================================
+# (선택) 영유아 관련 변수 포함 여부
+# baby_products 프로파일 사용 시 TRUE로 변경하세요
+USE_EXTENDED_VARS <- SELECTED_PROFILE == "baby_products"
+
+# ============================================================
+# 아래는 수정하지 않아도 됩니다.
+# ============================================================
+```
+
+---
+
+# 환경 설정
+
+```{r env-setup}
+# 핵심 함수 모듈 로드
+source("R/01_fetch.R")
+source("R/02_process.R")
+source("R/03_score.R")
+source("R/04_visualize.R")
+source("R/05_profiles.R")
+
+# Census 환경 초기화 (패키지 로드 + API 키 등록)
+setup_census()
+
+# 선택된 프로파일 확인
+profile <- INDUSTRY_PROFILES[[SELECTED_PROFILE]]
+```
+
+```{r profile-info, echo=FALSE}
+cat(glue::glue(
+  "선택된 프로파일: 【{profile$name_ko}】 ({profile$name_en})\n",
+  "설명: {profile$desc_ko}\n",
+  "분석 메모: {profile$notes_ko}\n\n",
+  "가중치 구성:\n",
+  "  소득     : {profile$w_income  * 100}%\n",
+  "  인구(규모): {profile$w_pop    * 100}%\n",
+  "  교육 수준: {profile$w_edu    * 100}%\n",
+  "  25-44세  : {profile$w_young  * 100}%\n",
+  "  영유아   : {profile$w_under5 * 100}%\n"
+))
+```
+
+---
+
+# 데이터 수집 및 전처리
+
+## 변수 사전 {.unnumbered}
+
+```{r var-dict, echo=FALSE}
+tibble::tibble(
+  변수코드    = names(if (USE_EXTENDED_VARS) VARS_EXTENDED else VARS_CORE),
+  ACS코드     = if (USE_EXTENDED_VARS) VARS_EXTENDED else VARS_CORE,
+  설명        = c(
+    "총 인구", "가구 중위 소득", "중위 연령", "학사 학위 소지자 수",
+    "남성 25-29세", "여성 25-29세", "남성 30-34세", "여성 30-34세",
+    "남성 35-39세", "여성 35-39세", "남성 40-44세", "여성 40-44세",
+    if (USE_EXTENDED_VARS) c("남아 0-4세", "여아 0-4세") else NULL
+  )
+) |>
+  DT::datatable(
+    options  = list(pageLength = 15, dom = "t"),
+    rownames = FALSE,
+    caption  = "분석에 사용되는 ACS 변수 목록"
+  )
+```
+
+## 전국 카운티 데이터 수집
+
+```{r data-fetch}
+# 캐시 경로 설정 (프로파일별로 별도 캐시)
+vars_label <- if (USE_EXTENDED_VARS) "extended" else "core"
+cache_file <- glue::glue("data/raw/acs_{ANALYSIS_YEAR}_{vars_label}.parquet")
+
+# 데이터 수집 (첫 실행 시 API 호출, 이후 캐시 사용)
+raw_data <- fetch_acs_county(
+  year       = ANALYSIS_YEAR,
+  vars       = if (USE_EXTENDED_VARS) VARS_EXTENDED else VARS_CORE,
+  state      = STATE_FILTER,
+  cache_path = cache_file
+)
+```
+
+## 데이터 전처리
+
+```{r data-process}
+# 전처리: 파생변수 생성, 결측치 처리
+county_df <- process_county_data(raw_data, year = ANALYSIS_YEAR, extended = USE_EXTENDED_VARS)
+```
+
+## 데이터 품질 확인
+
+```{r data-quality}
+summarize_data_quality(county_df)
+```
+
+---
+
+# 핵심 인구통계 분석
+
+## 소득 분포
+
+```{r income-dist}
+#| fig-cap: "미국 카운티별 가구 중위 소득 분포 (ACS 2023)"
+
+p_income <- county_df |>
+  ggplot2::ggplot(ggplot2::aes(x = median_hh_income)) +
+  ggplot2::geom_histogram(
+    bins  = 50,
+    fill  = "#4e9ac7",
+    color = "white",
+    alpha = 0.8
+  ) +
+  ggplot2::geom_vline(
+    xintercept = median(county_df$median_hh_income, na.rm = TRUE),
+    linetype = "dashed", color = "red", linewidth = 0.8
+  ) +
+  ggplot2::annotate(
+    "text",
+    x     = median(county_df$median_hh_income, na.rm = TRUE) * 1.05,
+    y     = Inf, vjust = 2,
+    label = glue::glue("중위값\n{scales::dollar(median(county_df$median_hh_income, na.rm=TRUE))}"),
+    color = "red", size = 3.5
+  ) +
+  ggplot2::scale_x_continuous(labels = scales::dollar) +
+  ggplot2::scale_y_continuous(labels = scales::comma) +
+  ggplot2::labs(
+    title    = "미국 카운티별 가구 중위 소득 분포",
+    subtitle = glue::glue("ACS 5-Year Estimates {ANALYSIS_YEAR} | 전국 {scales::comma(nrow(county_df))}개 카운티"),
+    x        = "가구 중위 소득 (달러)",
+    y        = "카운티 수",
+    caption  = "출처: US Census Bureau ACS 5-Year Estimates"
+  ) +
+  ggplot2::theme_minimal(base_size = 11) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"))
+
+plotly::ggplotly(p_income)
+```
+
+## 연령 구조 및 핵심 소비층 비율
+
+```{r age-dist}
+#| fig-cap: "25-44세 핵심 소비층 비율 분포 (상위 주 비교)"
+
+top_states_young <- county_df |>
+  dplyr::group_by(state) |>
+  dplyr::summarise(
+    avg_share_25_44 = mean(share_25_44, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(avg_share_25_44)) |>
+  head(20)
+
+top_states_young$state <- forcats::fct_reorder(top_states_young$state, top_states_young$avg_share_25_44)
+
+p_young <- ggplot2::ggplot(
+  top_states_young,
+  ggplot2::aes(
+    x    = avg_share_25_44,
+    y    = state,
+    fill = avg_share_25_44,
+    text = glue::glue("<b>{top_states_young$state}</b><br>25-44세 비율: {scales::percent(top_states_young$avg_share_25_44, 0.1)}")
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::scale_fill_viridis_c(option = "plasma", guide = "none") +
+  ggplot2::scale_x_continuous(labels = scales::percent) +
+  ggplot2::labs(
+    title    = "주별 평균 25-44세 핵심 소비층 비율 (상위 20개 주)",
+    subtitle = "25-44세는 구매력과 소비 활동이 가장 왕성한 핵심 타겟 연령대",
+    x        = "25-44세 인구 비율 (카운티 평균)",
+    y        = NULL
+  ) +
+  ggplot2::theme_minimal(base_size = 11) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"))
+
+plotly::ggplotly(p_young, tooltip = "text")
+```
+
+## 교육 수준 분포
+
+```{r edu-dist}
+#| fig-cap: "카운티별 대졸 이상 비율 vs. 가구 중위 소득"
+
+# 성능을 위해 최대 1500개 샘플링 (plotly 렌더링 최적화)
+edu_sample <- county_df |> dplyr::slice_sample(n = min(1500, nrow(county_df)))
+
+p_edu <- edu_sample |>
+  ggplot2::ggplot(ggplot2::aes(
+    x    = edu_ratio,
+    y    = median_hh_income,
+    size = pop_total,
+    text = glue::glue_data(
+      edu_sample,
+      "<b>{county}, {state}</b><br>",
+      "소득: {scales::dollar(median_hh_income)}<br>",
+      "대졸 비율: {scales::percent(edu_ratio, 0.1)}<br>",
+      "인구: {scales::comma(pop_total)}"
+    )
+  )) +
+  ggplot2::geom_point(alpha = 0.4, color = "#4e9ac7") +
+  ggplot2::geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.8) +
+  ggplot2::scale_x_continuous(labels = scales::percent) +
+  ggplot2::scale_y_continuous(labels = scales::dollar) +
+  ggplot2::scale_size_continuous(range = c(0.5, 6), guide = "none") +
+  ggplot2::labs(
+    title    = "교육 수준(대졸 비율) vs. 소득 수준",
+    subtitle = "고학력 지역일수록 소득 수준도 높은 경향",
+    x        = "대졸 이상 비율",
+    y        = "가구 중위 소득 (달러)"
+  ) +
+  ggplot2::theme_minimal(base_size = 11) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"))
+
+plotly::ggplotly(p_edu, tooltip = "text")
+```
+
+---
+
+# 시장 매력도 분석
+
+## 시장 점수 계산
+
+```{r score-compute}
+# 선택된 프로파일로 전체 카운티 점수 계산
+scored_df <- compute_market_score(
+  df      = county_df,
+  profile = profile,
+  method  = "percentile"  # 이상치에 강건한 백분위 정규화
+)
+```
+
+## Top `r TOP_N` 유망 시장
+
+```{r top-bar-chart}
+#| fig-cap: !expr glue::glue("【{profile$name_ko}】 프로파일 기준 상위 {TOP_N}개 카운티")
+
+plot_top_counties(scored_df, n = TOP_N, profile = profile)
+```
+
+## 소득 vs. 핵심 소비층 버블 차트
+
+```{r scatter-chart}
+#| fig-cap: "소득 수준과 25-44세 비율 기준 시장 포지셔닝"
+
+plot_scatter(scored_df, top_n_label = 15)
+```
+
+## 주별 시장 순위
+
+```{r state-summary}
+#| fig-cap: "주별 시장 매력도 집계 (평균 점수 기준)"
+
+plot_state_summary(scored_df, n_state = 15, metric = "mean")
+```
+
+---
+
+# 지리적 시각화
+
+::: {.callout-note}
+지도 데이터 첫 다운로드 시 추가 시간이 소요될 수 있습니다. 이후 실행은 캐시에서 즉시 로드됩니다.
+:::
+
+```{r geo-fetch}
+# 지도용 geometry 데이터 수집
+geo_sf <- fetch_geo_county(year = ANALYSIS_YEAR)
+```
+
+## 전국 카운티 시장 매력도 지도
+
+```{r leaflet-map}
+#| fig-cap: "미국 전국 카운티별 시장 매력도 (클릭하면 상세 정보 표시)"
+#| fig-height: 8
+
+plot_map_leaflet(scored_df, geo_sf, profile = profile)
+```
+
+---
+
+# 상위 지역 상세 분석
+
+## Top `r min(TOP_N, 50)` 카운티 상세 테이블
+
+필터와 정렬을 활용하여 원하는 지역을 찾아보세요.
+
+```{r results-table}
+plot_results_table(scored_df, n = min(TOP_N, 50))
+```
+
+## Top 10 지역 프로파일 카드
+
+```{r top10-cards, results='asis'}
+top10 <- get_top_counties(scored_df, n = 10)
+
+for (i in seq_len(nrow(top10))) {
+  row <- top10[i, ]
+  grade_color <- c("A"="#1a9641","B"="#a6d96a","C"="#fdae61","D"="#f46d43","E"="#d73027")[row$grade]
+
+  cat(glue::glue(
+    '\n::: {{.callout-note appearance="simple"}}\n',
+    '### #{row$rank} {row$county}, {row$state}\n\n',
+    '| 지표 | 값 |\n',
+    '|------|----|\n',
+    '| 시장 점수 | **{row$market_score_100}점** (등급: {row$grade}) |\n',
+    '| 가구 중위 소득 | {scales::dollar(row$median_hh_income)} |\n',
+    '| 총 인구 | {scales::comma(row$pop_total)} |\n',
+    '| 25-44세 비율 | {scales::percent(row$share_25_44, 0.1)} |\n',
+    '| 대졸 이상 비율 | {scales::percent(row$edu_ratio, 0.1)} |\n',
+    ':::\n'
+  ))
+}
+```
+
+---
+
+# 결론 및 활용 가이드
+
+## 분석 요약
+
+```{r summary-stats, echo=FALSE}
+a_grade <- sum(scored_df$grade == "A", na.rm = TRUE)
+b_grade <- sum(scored_df$grade == "B", na.rm = TRUE)
+top1     <- scored_df[1, ]
+
+cat(glue::glue(
+  "【{profile$name_ko}】 프로파일 분석 결과 요약\n",
+  "─────────────────────────────────────────\n",
+  "전체 분석 카운티: {scales::comma(nrow(scored_df))}개\n",
+  "A등급 (상위 20%): {a_grade}개 카운티\n",
+  "B등급 (상위 40%): {b_grade}개 카운티\n\n",
+  "최우선 진출 후보지:\n",
+  "  {top1$county}, {top1$state}\n",
+  "  시장 점수: {top1$market_score_100}점 | 소득: {scales::dollar(top1$median_hh_income)}\n"
+))
+```
+
+## 다음 단계 권고
+
+::: {.callout-tip}
+### 1단계: 프로파일 커스터마이징
+
+`R/05_profiles.R`의 `custom` 프로파일을 수정하거나 새 프로파일을 추가하여 귀사 제품에 맞는 가중치를 설정하세요.
+:::
+
+::: {.callout-tip}
+### 2단계: 주(State) 드릴다운
+
+유망 주를 3-5개로 좁힌 후, `STATE_FILTER <- c("CA", "TX")` 설정으로 해당 주 내 카운티를 더 정밀하게 분석하세요.
+:::
+
+::: {.callout-tip}
+### 3단계: 추가 변수 확장
+
+ACS에는 약 2만 개의 변수가 있습니다. `tidycensus::load_variables(2023, "acs5")` 로 탐색한 후 `VARS_CORE`에 추가하세요.
+
+예시: 아시아계 인구(`B02001_005`), 외국 출생 인구(`B05002_013`), 인터넷 사용 가구(`B28002_002`)
+:::
+
+::: {.callout-tip}
+### 4단계: PEP 인구 증가율 결합
+
+Census PEP 데이터로 해당 카운티의 인구 증가율을 확인하세요. 현재 매력도가 높고 + 미래 성장성도 높은 지역이 최우선 타겟입니다.
+
+```r
+# 예시: tidycensus::get_estimates()로 PEP 데이터 수집
+pep_data <- tidycensus::get_estimates(
+  geography = "county",
+  product   = "population",
+  year      = 2023
+)
+```
+:::
+
+---
+
+## 부록: 분석 방법론 {.appendix}
+
+### 데이터 출처
+
+- **ACS 5-Year Estimates `r ANALYSIS_YEAR`**: [Census Bureau](https://www.census.gov/programs-surveys/acs)
+- **R 패키지**: `tidycensus`, `tigris`, `ggplot2`, `plotly`, `leaflet`, `DT`
+
+### 정규화 방법
+
+본 분석은 **백분위 정규화(percent_rank)**를 사용합니다. 각 지표를 0~1 사이의 백분위 순위로 변환하여 이상치(예: LA County처럼 극단적으로 큰 인구)의 영향을 최소화합니다.
+
+### 점수 계산 공식
+
+```
+시장 점수 = Σ (가중치_i × 정규화된_지표_i)  ×  100
+
+• 소득 점수    = percent_rank(가구 중위 소득)
+• 인구 점수    = percent_rank(log(총인구 + 1))  ← 로그 변환으로 왜도 보정
+• 교육 점수    = percent_rank(대졸 이상 비율)
+• 청년층 점수  = percent_rank(25-44세 비율)
+• 영유아 점수  = percent_rank(0-4세 비율)
+```
+
+### 산업 프로파일 가중치 요약
+
+```{r profile-table, echo=FALSE}
+list_profiles() |>
+  DT::datatable(
+    options  = list(pageLength = 10, dom = "t"),
+    rownames = FALSE,
+    caption  = "산업별 가중치 설정"
+  )
+```
